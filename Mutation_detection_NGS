@@ -1,0 +1,173 @@
+process guppy {
+
+  publishDir params.outdir, mode:'copy'
+
+  label 'guppy'
+
+  tag "${params.runid}"
+
+  input:
+  path input from "${params.basedir}"
+
+  output:
+  tuple path("guppy"), path("fast5_pass"), path("reference") into guppy_ch
+
+  script:
+  """
+  mkdir -p guppy
+  mkdir -p reference
+  mkdir -p fast5_pass
+  mv ${input}/* fast5_pass/
+  echo "${params.runid}" > reference/pending-submission
+  guppy_basecaller -i fast5_pass -s guppy -c dna_r9.4.1_450bps_sup.cfg -x "cuda:0"
+  """
+
+}
+process minimap {
+
+  errorStrategy 'ignore'
+
+  publishDir params.outdir, mode:'copy'
+
+  label 'nanopanel2'
+
+  tag "${params.runid}"
+
+  input:
+  path folder from "${params.directory}/guppy/pass"
+  path genome from "${params.directory}/reference"
+
+  output:
+  tuple path("minimap"), path(genome) into minimap_ch
+  path("minimap") into minimap_ch2
+
+  script:
+  """
+  mkdir -p minimap
+  cat ${folder}/*.fastq > minimap/${params.id}.fastq
+  minimap2 --MD -a ${genome}/reference.fa minimap/${params.id}.fastq -o minimap/${params.id}.bam
+  """
+}
+
+process samtools {
+
+  errorStrategy 'ignore'
+
+  publishDir params.directory, mode:'copy'
+
+  label 'nanopanel2'
+
+  tag "${params.runid}"
+
+  input:
+  tuple path(folder), path(genome) from minimap_ch
+
+  output:
+  tuple path("samtools"), path(genome) into samtools_ch
+  path("samtools") into samtools_ch2
+  tuple path("samtools"), path(genome) into samtools_ch3
+
+  script:
+  """
+  mkdir -p samtools
+  dos2unix ${genome}/reference.fa
+  samtools sort ${folder}/${params.id}.bam -o samtools/${params.id}_sorted.bam
+  samtools index samtools/${params.id}_sorted.bam samtools/${params.id}_sorted.bam.bai
+  samtools stats ${folder}/${params.id}.bam | grep ^SN | cat > samtools/${params.id}_stats.text
+  samtools faidx ${genome}/reference.fa
+  """
+
+}
+
+process fastqc {
+
+  errorStrategy 'ignore'
+
+  publishDir params.directory, mode:'copy'
+
+  label 'fastqc'
+
+  tag "${params.runid}"
+
+  input:
+  path(folder) from minimap_ch2
+
+  output:
+  path("fastqc") into fastqc_ch
+
+  script:
+  """
+  mkdir -p fastqc
+  fastqc -t 6 -o fastqc/ ${folder}/${params.id}.fastq
+  """
+
+}
+
+process nanosv {
+
+  errorStrategy 'ignore'
+
+  publishDir params.outdir, mode:'copy'
+
+  label 'nanosv'
+
+  tag "${params.runid}"
+
+  input:
+  tuple path(folder), path(genome) from samtools_ch
+
+  output:
+  tuple path("nanosv") into nanosv_ch
+
+  script:
+  """
+  mkdir -p nanosv
+  NanoSV -t 8 ${folder}/${params.id}_sorted.bam -b ${genome}/reference.bed -o nanosv/${params.id}_nanoSV.vcf -s /usr/local/bin/samtools
+  """
+}
+
+process sniffles {
+
+  errorStrategy 'ignore'
+
+  publishDir params.outdir, mode:'copy'
+
+  label 'sniffles'
+
+  tag "${params.runid}"
+
+  input:
+  path(folder) from samtools_ch2
+
+  output:
+  path("sniffles") into sniffles_ch
+
+  script:
+  """
+  mkdir -p sniffles
+  sniffles -m ${folder}/${params.id}_sorted.bam -n 50 --report-seq -v sniffles/${params.id}_sniffle1.vcf
+  """
+}
+
+process pepper {
+
+  errorStrategy 'ignore'
+
+  publishDir params.outdir, mode:'copy'
+
+  label 'pepper'
+
+  tag "${params.runid}"
+
+  input:
+  tuple path(folder), path(genome) from samtools_ch3
+
+  output:
+  path("pepper") into pepper_ch
+
+  script:
+  """
+  mkdir -p pepper
+  run_pepper_margin_deepvariant call_variant -b ${folder}/${params.id}_sorted.bam -f ${genome}/reference.fa -o pepper -t 4 --ont_r9_guppy5_sup
+  """
+}
